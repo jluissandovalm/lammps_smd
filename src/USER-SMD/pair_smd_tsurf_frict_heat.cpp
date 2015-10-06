@@ -30,7 +30,7 @@
 #include "float.h"
 #include "stdlib.h"
 #include "string.h"
-#include "pair_smd_tri_surf_friction.h"
+#include "pair_smd_tsurf_frict_heat.h"
 #include "atom.h"
 #include "domain.h"
 #include "force.h"
@@ -55,28 +55,38 @@ using namespace Eigen;
 
 /* ---------------------------------------------------------------------- */
 
-PairTriSurFric::PairTriSurFric(LAMMPS *lmp) :
+PairTSurfFrictHeat::PairTSurfFrictHeat(LAMMPS *lmp) :
 		Pair(lmp) {
 
 	onerad_dynamic = onerad_frozen = maxrad_dynamic = maxrad_frozen = NULL;
 	bulkmodulus    = NULL;
 	kn             = NULL;
+
+	friCoeff       = NULL;
 	wallTemp       = NULL;
-	heatCp         = NULL;
+	heatCap        = NULL;
+	diffusiv       = NULL;
+
 	scale          =  1.0;
+
+	friction = false;
+	heat     = false;
 }
 
 /* ---------------------------------------------------------------------- */
 
-PairTriSurFric::~PairTriSurFric() {
+PairTSurfFrictHeat::~PairTSurfFrictHeat() {
 
 	if (allocated) {
 		memory->destroy(setflag);
 		memory->destroy(cutsq);
 		memory->destroy(bulkmodulus);
 		memory->destroy(kn);
+
+		memory->destroy(friCoeff);
 		memory->destroy(wallTemp);
-		memory->destroy(heatCp);
+		memory->destroy(heatCap);
+		memory->destroy(diffusiv);
 
 		delete[] onerad_dynamic;
 		delete[] onerad_frozen;
@@ -87,7 +97,7 @@ PairTriSurFric::~PairTriSurFric() {
 
 /* ---------------------------------------------------------------------- */
 
-void PairTriSurFric::compute(int eflag, int vflag) {
+void PairTSurfFrictHeat::compute(int eflag, int vflag) {
 	int i, j, ii, jj, inum, jnum, itype, jtype;
 	double rsq, r, evdwl, fpair, fpair_t;
 	int *ilist, *jlist, *numneigh, **firstneigh;
@@ -180,33 +190,34 @@ void PairTriSurFric::compute(int eflag, int vflag) {
 			rcut = r_tri + r_particle;
 			rcutSq = rcut * rcut;
 
+			if (heat) {
+
 			/*
 			 *   H E A T  T R A N S F E R
 			 */
-			rCutThermal = r_tri + sph_radius[particle];
+				rCutThermal = r_tri + sph_radius[particle];
 
-			if (rsq < rCutThermal * rCutThermal) {
+				if (rsq < rCutThermal * rCutThermal) {
 
-				x1(0) = smd_data_9[tri][0];
-				x1(1) = smd_data_9[tri][1];
-				x1(2) = smd_data_9[tri][2];
-				x2(0) = smd_data_9[tri][3];
-				x2(1) = smd_data_9[tri][4];
-				x2(2) = smd_data_9[tri][5];
-				x3(0) = smd_data_9[tri][6];
-				x3(1) = smd_data_9[tri][7];
-				x3(2) = smd_data_9[tri][8];
-				PointTriangleDistance(x4, x1, x2, x3, cp, r);
-				//printf("dist = %f\n", r);
-				//printf("vol  = %f\n", vol[particle]);
+					x1(0) = smd_data_9[tri][0];
+					x1(1) = smd_data_9[tri][1];
+					x1(2) = smd_data_9[tri][2];
+					x2(0) = smd_data_9[tri][3];
+					x2(1) = smd_data_9[tri][4];
+					x2(2) = smd_data_9[tri][5];
+					x3(0) = smd_data_9[tri][6];
+					x3(1) = smd_data_9[tri][7];
+					x3(2) = smd_data_9[tri][8];
+					PointTriangleDistance(x4, x1, x2, x3, cp, r);
 
-				deSum  = 1.0E-1 / (r * pow(vol[particle],1/3)); // diffusivity = 1.0e-1
-				//printf("cp / (r*pow)  = %f\n", de[particle]);
-				deSum *= (heatCp[itype][jtype] * rmass[particle] * wallTemp[itype][jtype] - e[particle]);
-				de[particle] += deSum;
+					deSum  = diffusiv[itype][jtype] / (r * pow(vol[particle],1/3)); // diffusivity = 1.0e-1
+
+					deSum *= (heatCap[itype][jtype] * rmass[particle] * wallTemp[itype][jtype] - e[particle]);
+					de[particle] += deSum;
+				}
+			} else {
+				de[particle] = 0;
 			}
-
-			//printf("type i=%d, type j=%d, r=%f, ri=%f, rj=%f\n", itype, jtype, sqrt(rsq), ri, rj);
 
 			if (rsq < rcutSq) {
 
@@ -249,7 +260,7 @@ void PairTriSurFric::compute(int eflag, int vflag) {
 						normal *= -1.0;
 					}
 
-											/*
+					/*
 					 * penalty force pushes particle away from triangle
 					 */
 					if (r < 1.0 * radius[particle]) {
@@ -263,10 +274,9 @@ void PairTriSurFric::compute(int eflag, int vflag) {
 						evdwl = r * fpair * 0.4e0 * delta; // GCG 25 April: this expression conserves total energy
 						//printf("tri interaction: r = %f, rcut=%f\n", r, radius[particle]);
 
-
-
+						if (friction) {
 						/*
-						 * Compute Tangential Velocity
+						 *   F R I C T I O N
 						 */
 						v4(0) = v[particle][0];
 						v4(1) = v[particle][1];
@@ -276,8 +286,14 @@ void PairTriSurFric::compute(int eflag, int vflag) {
 						v4t    = v4 - v4n;
 						v4_dir = v4t / v4t.norm();
 
-						fpair_t = mhu * fpair; // Coulumb's Friction
+						fpair_t = friCoeff[itype][jtype] * fpair; // Coulumb's Friction
 						//ADD VISCOUS FRICTION F(v) = -sig * v4t
+						} else {
+							fpair_t   = 0;
+						    v4_dir(0) = 0;
+						    v4_dir(1) = 0;
+						    v4_dir(2) = 0;
+						}
 
 						fpair /= (r + 1.0e-2 * radius[particle]); // divide by r + softening and multiply with non-normalized distance vector
 
@@ -353,7 +369,7 @@ void PairTriSurFric::compute(int eflag, int vflag) {
  allocate all arrays
  ------------------------------------------------------------------------- */
 
-void PairTriSurFric::allocate() {
+void PairTSurfFrictHeat::allocate() {
 	allocated = 1;
 	int n = atom->ntypes;
 
@@ -365,8 +381,10 @@ void PairTriSurFric::allocate() {
 	memory->create(bulkmodulus, n + 1, n + 1, "pair:kspring");
 	memory->create(kn,          n + 1, n + 1, "pair:kn");
 
-	memory->create(wallTemp,    n + 1, n + 1, "pair:walltemp");
-	memory->create(heatCp,      n + 1, n + 1, "pair:heatcp");
+		memory->create(friCoeff,    n + 1, n + 1, "pair:friCoeff");
+		memory->create(wallTemp,    n + 1, n + 1, "pair:walltemp");
+		memory->create(heatCap,     n + 1, n + 1, "pair:heatCap");
+		memory->create(diffusiv,    n + 1, n + 1, "pair:diffusiv");
 
 	memory->create(cutsq,       n + 1, n + 1, "pair:cutsq"); // always needs to be allocated, even with granular neighborlist
 
@@ -380,45 +398,95 @@ void PairTriSurFric::allocate() {
  global settings
  ------------------------------------------------------------------------- */
 
-void PairTriSurFric::settings(int narg, char **arg) {
-	if (narg != 2)
-		error->all(FLERR, "Illegal number of args for pair_style smd/tri_surf_fric. Scale Factor and Friction Coefficient are required");
+void PairTSurfFrictHeat::settings(int narg, char **arg) {
+	if (narg != 3)
+		error->all(FLERR, "Illegal number of args for pair_style smd/tri_surf_fric. Scale Factor and  Coefficient are required");
 
 	scale = force->numeric(FLERR, arg[0]);
-	mhu   = force->numeric(FLERR, arg[1]);
 
 	if (comm->me == 0) {
 		printf("\n>>========>>========>>========>>========>>========>>========>>========>>========\n");
 		printf("SMD/TRI_SURF_FRIC CONTACT SETTINGS:\n");
-		printf("... effective contact radius is scaled by %f\n", scale);
-		printf("... surface-particle fricction coefficient is %f\n", mhu);
-		printf(">>========>>========>>========>>========>>========>>========>>========>>========\n");
 	}
 
+	if (strcmp(arg[1], "*FRICTION") == 0) {
+		friction = true;
+		if (comm->me == 0) printf("... friction active\n");
+	} else if (strcmp(arg[1], "*NO_FRICTION") == 0) {
+		friction = false;
+		if (comm->me == 0) printf("... friction NOT active\n");
+		} else {
+			error->all(FLERR,
+						"Illegal settings keyword for first keyword of pair style PairTSurfFrictHeat. "
+						"Must be either *FRICTION or *NO_FRICTION");
+			}
 
+	if (strcmp(arg[2], "*HEAT") == 0) {
+		heat = true;
+		if (comm->me == 0) printf("... heat transfer active\n");
+	} else if (strcmp(arg[2], "*NO_HEAT") == 0) {
+		heat = false;
+		if (comm->me == 0) printf("... friction NOT active\n");
+			} else {
+				error->all(FLERR,
+						"Illegal settings keyword for first keyword of pair style PairTSurfFrictHeat. "
+						"Must be either *HEAT or *NO_NO_HEAT");
+			}
+
+	printf(">>========>>========>>========>>========>>========>>========>>========>>========\n");
 }
 
 /* ----------------------------------------------------------------------
  set coeffs for one or more type pairs
  ------------------------------------------------------------------------- */
 
-void PairTriSurFric::coeff(int narg, char **arg) {
-	if (narg != 5)
-		error->all(FLERR, "Incorrect args for pair coefficients");
-	if (!allocated)
-		allocate();
+void PairTSurfFrictHeat::coeff(int narg, char **arg) {
+
+	if (narg != 7)	error->all(FLERR, "Incorrect args for pair coefficients");
+	if (!allocated)	allocate();
 
 	int ilo, ihi, jlo, jhi;
 	force->bounds(arg[0], atom->ntypes, ilo, ihi);
 	force->bounds(arg[1], atom->ntypes, jlo, jhi);
 
 	double bulkmodulus_one = atof(arg[2]);
-	double wallTemp_in     = atof(arg[3]);
-	double heatCp_in       = atof(arg[4]);
 
-	printf("Wall Temperature is: --- %f\n", wallTemp_in);
-	printf("Heat Capacity is: ------ %f\n", heatCp_in);
+	double friCoeff_in     = atof(arg[3]);
+	double wallTemp_in     = atof(arg[4]);
+	double heatCap_in      = atof(arg[5]);
+	double diffusiv_in     = atof(arg[6]);
 
+	printf("Friction Coefficient is: %f\n", friCoeff_in);
+	printf("Wall Temperature is:     %f\n", wallTemp_in);
+	printf("Heat Capacity is:        %f\n", heatCap_in);
+	printf("Diffusivity is:          %f\n", diffusiv_in);
+/*
+	if (friction && heat)	{
+		if (narg != 7)  error->all(FLERR, "Incorrect args for pair coefficients");
+		double friCoeff_in = atof(arg[3]);
+		double wallTemp_in = atof(arg[4]);
+		double heatCap_in  = atof(arg[5]);
+		double diffusiv_in = atof(arg[6]);
+		printf("Friction Coefficient is: %f\n", friCoeff_in);
+		printf("Wall Temperature is:     %f\n", wallTemp_in);
+		printf("Heat Capacity is:        %f\n", heatCap_in);
+		printf("Diffusivity is:          %f\n", diffusiv_in);
+
+	} else if (heat)		{
+		if (narg != 6)  error->all(FLERR, "Incorrect args for pair coefficients");
+		double wallTemp_in = atof(arg[3]);
+		double heatCap_in  = atof(arg[4]);
+		double diffusiv_in = atof(arg[5]);
+		printf("Wall Temperature is:     %f\n", wallTemp_in);
+		printf("Heat Capacity is:        %f\n", heatCap_in);
+		printf("Diffusivity is:          %f\n", diffusiv_in);
+
+	} else if (friction)	{
+		if (narg != 4)  error->all(FLERR, "Incorrect args for pair coefficients");
+		double friCoeff_in = atof(arg[3]);
+		printf("Friction Coefficient is: %f\n", friCoeff_in);
+	}
+*/
 	// set short-range force constant
 	double kn_one = 0.0;
 	if (domain->dimension == 3) {
@@ -432,9 +500,17 @@ void PairTriSurFric::coeff(int narg, char **arg) {
 		for (int j = MAX(jlo, i); j <= jhi; j++) {
 			bulkmodulus[i][j] = bulkmodulus_one;
 			kn[i][j]          = kn_one;
-			wallTemp[i][j]    = wallTemp_in;
-			heatCp[i][j]      = heatCp_in;
-			setflag[i][j]     = 1;
+
+			if (friction) {
+				friCoeff[i][j] = friCoeff_in;
+			}
+			if (heat)	  {
+				wallTemp[i][j] = wallTemp_in;
+				heatCap[i][j]  = heatCap_in;
+				diffusiv[i][j] = diffusiv_in;
+			}
+
+		setflag[i][j] = 1;
 			count++;
 		}
 	}
@@ -447,7 +523,7 @@ void PairTriSurFric::coeff(int narg, char **arg) {
  init for one type pair i,j and corresponding j,i
  ------------------------------------------------------------------------- */
 
-double PairTriSurFric::init_one(int i, int j) {
+double PairTSurfFrictHeat::init_one(int i, int j) {
 
 	if (!allocated)
 		allocate();
@@ -457,8 +533,15 @@ double PairTriSurFric::init_one(int i, int j) {
 
 	bulkmodulus[j][i] = bulkmodulus[i][j];
 	kn[j][i]          = kn[i][j];
-	wallTemp[j][i]    = wallTemp[i][j];
-	heatCp[j][i]      = heatCp[i][j];
+
+	if (friction) 	{
+		friCoeff[j][i]    = friCoeff[i][j];
+	}
+	if (heat)		{
+		wallTemp[j][i]    = wallTemp[i][j];
+		heatCap[j][i]     = heatCap[i][j];
+		diffusiv[j][i]    = diffusiv[i][j];
+	}
 
 	// cutoff = sum of max I,J radii for
 	// dynamic/dynamic & dynamic/frozen interactions, but not frozen/frozen
@@ -477,7 +560,7 @@ double PairTriSurFric::init_one(int i, int j) {
  init specific to this pair style
  ------------------------------------------------------------------------- */
 
-void PairTriSurFric::init_style() {
+void PairTSurfFrictHeat::init_style() {
 	int i;
 
 	// error checks
@@ -518,7 +601,7 @@ void PairTriSurFric::init_style() {
  optional granular history list
  ------------------------------------------------------------------------- */
 
-void PairTriSurFric::init_list(int id, NeighList *ptr) {
+void PairTSurfFrictHeat::init_list(int id, NeighList *ptr) {
 	if (id == 0)
 		list = ptr;
 }
@@ -527,7 +610,7 @@ void PairTriSurFric::init_list(int id, NeighList *ptr) {
  memory usage of local atom-based arrays
  ------------------------------------------------------------------------- */
 
-double PairTriSurFric::memory_usage() {
+double PairTSurfFrictHeat::memory_usage() {
 
 	return 0.0;
 }
@@ -615,7 +698,7 @@ double PairTriSurFric::memory_usage() {
 %  reg4  | reg5    \ reg6
  */
 
-//void PairTriSurFric::PointTriangleDistance(const Vector3d P, const Vector3d TRI1, const Vector3d TRI2, const Vector3d TRI3,
+//void PairTSurfFrictHeat::PointTriangleDistance(const Vector3d P, const Vector3d TRI1, const Vector3d TRI2, const Vector3d TRI3,
 //		Vector3d &CP, double &dist) {
 //
 //	Vector3d B, E0, E1, D;
@@ -818,7 +901,7 @@ double PairTriSurFric::memory_usage() {
  % http:\\www.geometrictools.com/Documentation/DistancePoint3Triangle3.pdf
  */
 
-void PairTriSurFric::PointTriangleDistance(const Vector3d sourcePosition, const Vector3d TRI0, const Vector3d TRI1,
+void PairTSurfFrictHeat::PointTriangleDistance(const Vector3d sourcePosition, const Vector3d TRI0, const Vector3d TRI1,
 		const Vector3d TRI2, Vector3d &CP, double &dist) {
 
 	Vector3d edge0 = TRI1 - TRI0;
@@ -893,7 +976,7 @@ void PairTriSurFric::PointTriangleDistance(const Vector3d sourcePosition, const 
 
 }
 
-double PairTriSurFric::clamp(const double a, const double min, const double max) {
+double PairTSurfFrictHeat::clamp(const double a, const double min, const double max) {
 	if (a < min) {
 		return min;
 	} else if (a > max) {
@@ -903,8 +986,8 @@ double PairTriSurFric::clamp(const double a, const double min, const double max)
 	}
 }
 
-void *PairTriSurFric::extract(const char *str, int &i) {
-	//printf("in PairTriSurFric::extract\n");
+void *PairTSurfFrictHeat::extract(const char *str, int &i) {
+	//printf("in PairTSurfFrictHeat::extract\n");
 	if (strcmp(str, "smd/tri_surf_fric/stable_time_increment_ptr") == 0) {
 		return (void *) &stable_time_increment;
 	}
