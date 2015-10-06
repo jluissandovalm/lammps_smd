@@ -30,7 +30,7 @@
 #include "float.h"
 #include "stdlib.h"
 #include "string.h"
-#include "pair_smd_tri_surf_friction.h"
+#include "pair_smd_triangulated_surface.h"
 #include "atom.h"
 #include "domain.h"
 #include "force.h"
@@ -55,28 +55,24 @@ using namespace Eigen;
 
 /* ---------------------------------------------------------------------- */
 
-PairTriSurFric::PairTriSurFric(LAMMPS *lmp) :
+PairTriSurf::PairTriSurf(LAMMPS *lmp) :
 		Pair(lmp) {
 
 	onerad_dynamic = onerad_frozen = maxrad_dynamic = maxrad_frozen = NULL;
-	bulkmodulus    = NULL;
-	kn             = NULL;
-	wallTemp       = NULL;
-	heatCp         = NULL;
-	scale          =  1.0;
+	bulkmodulus = NULL;
+	kn = NULL;
+	scale = 1.0;
 }
 
 /* ---------------------------------------------------------------------- */
 
-PairTriSurFric::~PairTriSurFric() {
+PairTriSurf::~PairTriSurf() {
 
 	if (allocated) {
 		memory->destroy(setflag);
 		memory->destroy(cutsq);
 		memory->destroy(bulkmodulus);
 		memory->destroy(kn);
-		memory->destroy(wallTemp);
-		memory->destroy(heatCp);
 
 		delete[] onerad_dynamic;
 		delete[] onerad_frozen;
@@ -87,13 +83,13 @@ PairTriSurFric::~PairTriSurFric() {
 
 /* ---------------------------------------------------------------------- */
 
-void PairTriSurFric::compute(int eflag, int vflag) {
+void PairTriSurf::compute(int eflag, int vflag) {
 	int i, j, ii, jj, inum, jnum, itype, jtype;
-	double rsq, r, evdwl, fpair, fpair_t;
+	double rsq, r, evdwl, fpair;
 	int *ilist, *jlist, *numneigh, **firstneigh;
-	double rcut, rCutThermal, deSum, r_geom, delta, r_tri, r_particle, touch_distance, dt_crit;
+	double rcut, r_geom, delta, r_tri, r_particle, touch_distance, dt_crit;
 	int tri, particle;
-	Vector3d normal, x1, x2, x3, x4, x13, x23, x43, w, cp, x4cp, v4, v4n, v4t, v4_dir, vnew, v_old;
+	Vector3d normal, x1, x2, x3, x4, x13, x23, x43, w, cp, x4cp, vnew, v_old;
 	;
 	Vector3d xi, x_center, dx;
 	Matrix2d C;
@@ -105,20 +101,16 @@ void PairTriSurFric::compute(int eflag, int vflag) {
 	else
 		evflag = vflag_fdotr = 0;
 
-	int *mol            = atom->molecule;
-	double **f          = atom->f;
+	int *mol = atom->molecule;
+	double **f = atom->f;
 	double **smd_data_9 = atom->smd_data_9;
-	double **x          = atom->x;
-	double **x0         = atom->x0;
-	double **v          = atom->v;
-	double *rmass       = atom->rmass;
-	double *vol         = atom->vfrac;
-	double *e           = atom->e;
-	double *de          = atom->de;
-	int *type           = atom->type;
-	int nlocal          = atom->nlocal;
-	double *radius      = atom->contact_radius;
-	double *sph_radius  = atom->radius;
+	double **x = atom->x;
+	double **x0 = atom->x0;
+	double **v = atom->v;
+	double *rmass = atom->rmass;
+	int *type = atom->type;
+	int nlocal = atom->nlocal;
+	double *radius = atom->contact_radius;
 	double rcutSq;
 	Vector3d offset;
 
@@ -180,32 +172,6 @@ void PairTriSurFric::compute(int eflag, int vflag) {
 			rcut = r_tri + r_particle;
 			rcutSq = rcut * rcut;
 
-			/*
-			 *   H E A T  T R A N S F E R
-			 */
-			rCutThermal = r_tri + sph_radius[particle];
-
-			if (rsq < rCutThermal * rCutThermal) {
-
-				x1(0) = smd_data_9[tri][0];
-				x1(1) = smd_data_9[tri][1];
-				x1(2) = smd_data_9[tri][2];
-				x2(0) = smd_data_9[tri][3];
-				x2(1) = smd_data_9[tri][4];
-				x2(2) = smd_data_9[tri][5];
-				x3(0) = smd_data_9[tri][6];
-				x3(1) = smd_data_9[tri][7];
-				x3(2) = smd_data_9[tri][8];
-				PointTriangleDistance(x4, x1, x2, x3, cp, r);
-				//printf("dist = %f\n", r);
-				//printf("vol  = %f\n", vol[particle]);
-
-				deSum  = 1.0E-1 / (r * pow(vol[particle],1/3)); // diffusivity = 1.0e-1
-				//printf("cp / (r*pow)  = %f\n", de[particle]);
-				deSum *= (heatCp[itype][jtype] * rmass[particle] * wallTemp[itype][jtype] - e[particle]);
-				de[particle] += deSum;
-			}
-
 			//printf("type i=%d, type j=%d, r=%f, ri=%f, rj=%f\n", itype, jtype, sqrt(rsq), ri, rj);
 
 			if (rsq < rcutSq) {
@@ -249,7 +215,7 @@ void PairTriSurFric::compute(int eflag, int vflag) {
 						normal *= -1.0;
 					}
 
-											/*
+					/*
 					 * penalty force pushes particle away from triangle
 					 */
 					if (r < 1.0 * radius[particle]) {
@@ -263,35 +229,18 @@ void PairTriSurFric::compute(int eflag, int vflag) {
 						evdwl = r * fpair * 0.4e0 * delta; // GCG 25 April: this expression conserves total energy
 						//printf("tri interaction: r = %f, rcut=%f\n", r, radius[particle]);
 
-
-
-						/*
-						 * Compute Tangential Velocity
-						 */
-						v4(0) = v[particle][0];
-						v4(1) = v[particle][1];
-						v4(2) = v[particle][2];
-
-						v4n    = v4.dot(normal) * normal;
-						v4t    = v4 - v4n;
-						v4_dir = v4t / v4t.norm();
-
-						fpair_t = mhu * fpair; // Coulumb's Friction
-						//ADD VISCOUS FRICTION F(v) = -sig * v4t
-
 						fpair /= (r + 1.0e-2 * radius[particle]); // divide by r + softening and multiply with non-normalized distance vector
 
 						if (particle < nlocal) {
-							f[particle][0] += (x4cp(0) * fpair) - (v4_dir(0) * fpair_t);
-							f[particle][1] += (x4cp(1) * fpair) - (v4_dir(1) * fpair_t);
-							f[particle][2] += (x4cp(2) * fpair) - (v4_dir(2) * fpair_t);
-
+							f[particle][0] += x4cp(0) * fpair;
+							f[particle][1] += x4cp(1) * fpair;
+							f[particle][2] += x4cp(2) * fpair;
 						}
 
 						if (tri < nlocal) {
-							f[tri][0] -= (x4cp(0) * fpair); - (v4_dir(0) * fpair_t);
-							f[tri][1] -= (x4cp(1) * fpair); - (v4_dir(1) * fpair_t);
-							f[tri][2] -= (x4cp(2) * fpair); - (v4_dir(2) * fpair_t);
+							f[tri][0] -= x4cp(0) * fpair;
+							f[tri][1] -= x4cp(1) * fpair;
+							f[tri][2] -= x4cp(2) * fpair;
 						}
 
 						if (evflag) {
@@ -304,7 +253,7 @@ void PairTriSurFric::compute(int eflag, int vflag) {
 					 * if particle comes too close to triangle, reflect its velocity and explicitly move it away
 					 */
 
-					touch_distance = 0.5 * radius[particle];
+					touch_distance = 0.1 * radius[particle];
 					if (r < touch_distance) {
 
 						/*
@@ -318,14 +267,14 @@ void PairTriSurFric::compute(int eflag, int vflag) {
 						v_old(1) = v[particle][1];
 						v_old(2) = v[particle][2];
 						if (v_old.dot(normal) < 0.0) {
-							//printf("flipping velocity\n");
+							printf("flipping velocity\n");
 							vnew = 1.0 * (-2.0 * v_old.dot(normal) * normal + v_old);
 							v[particle][0] = vnew(0);
 							v[particle][1] = vnew(1);
 							v[particle][2] = vnew(2);
 						}
 
-						//printf("moving particle on top of triangle\n");
+						printf("moving particle on top of triangle\n");
 						x[particle][0] = cp(0) + touch_distance * normal(0);
 						x[particle][1] = cp(1) + touch_distance * normal(1);
 						x[particle][2] = cp(2) + touch_distance * normal(2);
@@ -353,48 +302,41 @@ void PairTriSurFric::compute(int eflag, int vflag) {
  allocate all arrays
  ------------------------------------------------------------------------- */
 
-void PairTriSurFric::allocate() {
+void PairTriSurf::allocate() {
 	allocated = 1;
 	int n = atom->ntypes;
 
-	memory->create(setflag,     n + 1, n + 1, "pair:setflag");
+	memory->create(setflag, n + 1, n + 1, "pair:setflag");
 	for (int i = 1; i <= n; i++)
 		for (int j = i; j <= n; j++)
 			setflag[i][j] = 0;
 
 	memory->create(bulkmodulus, n + 1, n + 1, "pair:kspring");
-	memory->create(kn,          n + 1, n + 1, "pair:kn");
+	memory->create(kn, n + 1, n + 1, "pair:kn");
 
-	memory->create(wallTemp,    n + 1, n + 1, "pair:walltemp");
-	memory->create(heatCp,      n + 1, n + 1, "pair:heatcp");
-
-	memory->create(cutsq,       n + 1, n + 1, "pair:cutsq"); // always needs to be allocated, even with granular neighborlist
+	memory->create(cutsq, n + 1, n + 1, "pair:cutsq"); // always needs to be allocated, even with granular neighborlist
 
 	onerad_dynamic = new double[n + 1];
-	onerad_frozen  = new double[n + 1];
+	onerad_frozen = new double[n + 1];
 	maxrad_dynamic = new double[n + 1];
-	maxrad_frozen  = new double[n + 1];
+	maxrad_frozen = new double[n + 1];
 }
 
 /* ----------------------------------------------------------------------
  global settings
  ------------------------------------------------------------------------- */
 
-void PairTriSurFric::settings(int narg, char **arg) {
-	if (narg != 2)
-		error->all(FLERR, "Illegal number of args for pair_style smd/tri_surf_fric. Scale Factor and Friction Coefficient are required");
+void PairTriSurf::settings(int narg, char **arg) {
+	if (narg != 1)
+		error->all(FLERR, "Illegal number of args for pair_style smd/tri_surface");
 
 	scale = force->numeric(FLERR, arg[0]);
-	mhu   = force->numeric(FLERR, arg[1]);
-
 	if (comm->me == 0) {
 		printf("\n>>========>>========>>========>>========>>========>>========>>========>>========\n");
-		printf("SMD/TRI_SURF_FRIC CONTACT SETTINGS:\n");
+		printf("SMD/TRI_SURFACE CONTACT SETTINGS:\n");
 		printf("... effective contact radius is scaled by %f\n", scale);
-		printf("... surface-particle fricction coefficient is %f\n", mhu);
 		printf(">>========>>========>>========>>========>>========>>========>>========>>========\n");
 	}
-
 
 }
 
@@ -402,8 +344,8 @@ void PairTriSurFric::settings(int narg, char **arg) {
  set coeffs for one or more type pairs
  ------------------------------------------------------------------------- */
 
-void PairTriSurFric::coeff(int narg, char **arg) {
-	if (narg != 5)
+void PairTriSurf::coeff(int narg, char **arg) {
+	if (narg != 3)
 		error->all(FLERR, "Incorrect args for pair coefficients");
 	if (!allocated)
 		allocate();
@@ -413,11 +355,6 @@ void PairTriSurFric::coeff(int narg, char **arg) {
 	force->bounds(arg[1], atom->ntypes, jlo, jhi);
 
 	double bulkmodulus_one = atof(arg[2]);
-	double wallTemp_in     = atof(arg[3]);
-	double heatCp_in       = atof(arg[4]);
-
-	printf("Wall Temperature is: --- %f\n", wallTemp_in);
-	printf("Heat Capacity is: ------ %f\n", heatCp_in);
 
 	// set short-range force constant
 	double kn_one = 0.0;
@@ -431,10 +368,8 @@ void PairTriSurFric::coeff(int narg, char **arg) {
 	for (int i = ilo; i <= ihi; i++) {
 		for (int j = MAX(jlo, i); j <= jhi; j++) {
 			bulkmodulus[i][j] = bulkmodulus_one;
-			kn[i][j]          = kn_one;
-			wallTemp[i][j]    = wallTemp_in;
-			heatCp[i][j]      = heatCp_in;
-			setflag[i][j]     = 1;
+			kn[i][j] = kn_one;
+			setflag[i][j] = 1;
 			count++;
 		}
 	}
@@ -447,7 +382,7 @@ void PairTriSurFric::coeff(int narg, char **arg) {
  init for one type pair i,j and corresponding j,i
  ------------------------------------------------------------------------- */
 
-double PairTriSurFric::init_one(int i, int j) {
+double PairTriSurf::init_one(int i, int j) {
 
 	if (!allocated)
 		allocate();
@@ -456,19 +391,17 @@ double PairTriSurFric::init_one(int i, int j) {
 		error->all(FLERR, "All pair coeffs are not set");
 
 	bulkmodulus[j][i] = bulkmodulus[i][j];
-	kn[j][i]          = kn[i][j];
-	wallTemp[j][i]    = wallTemp[i][j];
-	heatCp[j][i]      = heatCp[i][j];
+	kn[j][i] = kn[i][j];
 
 	// cutoff = sum of max I,J radii for
 	// dynamic/dynamic & dynamic/frozen interactions, but not frozen/frozen
 
 	double cutoff = maxrad_dynamic[i] + maxrad_dynamic[j];
-	cutoff = MAX(cutoff, maxrad_frozen[i]  + maxrad_dynamic[j]);
-	cutoff = MAX(cutoff, maxrad_dynamic[i] +  maxrad_frozen[j]);
+	cutoff = MAX(cutoff, maxrad_frozen[i] + maxrad_dynamic[j]);
+	cutoff = MAX(cutoff, maxrad_dynamic[i] + maxrad_frozen[j]);
 
 	if (comm->me == 0) {
-		printf("cutoff for pair smd/tri_surf_fric = %f\n", cutoff);
+		printf("cutoff for pair smd/smd/tri_surface = %f\n", cutoff);
 	}
 	return cutoff;
 }
@@ -477,13 +410,13 @@ double PairTriSurFric::init_one(int i, int j) {
  init specific to this pair style
  ------------------------------------------------------------------------- */
 
-void PairTriSurFric::init_style() {
+void PairTriSurf::init_style() {
 	int i;
 
 	// error checks
 
 	if (!atom->contact_radius_flag)
-		error->all(FLERR, "Pair style smd/tri_surf_fric requires atom style with contact_radius");
+		error->all(FLERR, "Pair style smd/smd/tri_surface requires atom style with contact_radius");
 
 	// old: half list
 	int irequest = neighbor->request(this);
@@ -510,7 +443,7 @@ void PairTriSurFric::init_style() {
 	}
 
 	MPI_Allreduce(&onerad_dynamic[1], &maxrad_dynamic[1], atom->ntypes, MPI_DOUBLE, MPI_MAX, world);
-	MPI_Allreduce(&onerad_frozen[1],  &maxrad_frozen[1],  atom->ntypes, MPI_DOUBLE, MPI_MAX, world);
+	MPI_Allreduce(&onerad_frozen[1], &maxrad_frozen[1], atom->ntypes, MPI_DOUBLE, MPI_MAX, world);
 }
 
 /* ----------------------------------------------------------------------
@@ -518,7 +451,7 @@ void PairTriSurFric::init_style() {
  optional granular history list
  ------------------------------------------------------------------------- */
 
-void PairTriSurFric::init_list(int id, NeighList *ptr) {
+void PairTriSurf::init_list(int id, NeighList *ptr) {
 	if (id == 0)
 		list = ptr;
 }
@@ -527,7 +460,7 @@ void PairTriSurFric::init_list(int id, NeighList *ptr) {
  memory usage of local atom-based arrays
  ------------------------------------------------------------------------- */
 
-double PairTriSurFric::memory_usage() {
+double PairTriSurf::memory_usage() {
 
 	return 0.0;
 }
@@ -615,7 +548,7 @@ double PairTriSurFric::memory_usage() {
 %  reg4  | reg5    \ reg6
  */
 
-//void PairTriSurFric::PointTriangleDistance(const Vector3d P, const Vector3d TRI1, const Vector3d TRI2, const Vector3d TRI3,
+//void PairTriSurf::PointTriangleDistance(const Vector3d P, const Vector3d TRI1, const Vector3d TRI2, const Vector3d TRI3,
 //		Vector3d &CP, double &dist) {
 //
 //	Vector3d B, E0, E1, D;
@@ -818,7 +751,7 @@ double PairTriSurFric::memory_usage() {
  % http:\\www.geometrictools.com/Documentation/DistancePoint3Triangle3.pdf
  */
 
-void PairTriSurFric::PointTriangleDistance(const Vector3d sourcePosition, const Vector3d TRI0, const Vector3d TRI1,
+void PairTriSurf::PointTriangleDistance(const Vector3d sourcePosition, const Vector3d TRI0, const Vector3d TRI1,
 		const Vector3d TRI2, Vector3d &CP, double &dist) {
 
 	Vector3d edge0 = TRI1 - TRI0;
@@ -893,7 +826,7 @@ void PairTriSurFric::PointTriangleDistance(const Vector3d sourcePosition, const 
 
 }
 
-double PairTriSurFric::clamp(const double a, const double min, const double max) {
+double PairTriSurf::clamp(const double a, const double min, const double max) {
 	if (a < min) {
 		return min;
 	} else if (a > max) {
@@ -903,9 +836,9 @@ double PairTriSurFric::clamp(const double a, const double min, const double max)
 	}
 }
 
-void *PairTriSurFric::extract(const char *str, int &i) {
-	//printf("in PairTriSurFric::extract\n");
-	if (strcmp(str, "smd/tri_surf_fric/stable_time_increment_ptr") == 0) {
+void *PairTriSurf::extract(const char *str, int &i) {
+	//printf("in PairTriSurf::extract\n");
+	if (strcmp(str, "smd/tri_surface/stable_time_increment_ptr") == 0) {
 		return (void *) &stable_time_increment;
 	}
 

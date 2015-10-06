@@ -25,12 +25,12 @@
 
 #ifdef PAIR_CLASS
 
-PairStyle(smd/tri_surf_fric,PairTriSurFric)
+PairStyle(smd/tri_surface,PairTriSurf)
 
 #else
 
-#ifndef LMP_SMD_TRI_SURF_FRIC_H
-#define LMP_SMD_TRI_SURF_FRIC_H
+#ifndef LMP_SMD_TRI_SURFACE_H
+#define LMP_SMD_TRI_SURFACE_H
 
 #include "pair.h"
 #include <Eigen/Eigen>
@@ -39,10 +39,10 @@ using namespace Eigen;
 
 namespace LAMMPS_NS {
 
-class PairTriSurFric : public Pair {
+class PairTriSurf : public Pair {
  public:
-  PairTriSurFric(class LAMMPS *);
-  virtual ~PairTriSurFric();
+  PairTriSurf(class LAMMPS *);
+  virtual ~PairTriSurf();
   virtual void compute(int, int);
   void settings(int, char **);
   void coeff(int, char **);
@@ -56,16 +56,13 @@ class PairTriSurFric : public Pair {
   void *extract(const char *, int &);
 
  protected:
-  double **bulkmodulus; //
-  double **kn;          //
-  double **wallTemp;    //
-  double **heatCp;      // per-type arrays read in from pair_coeff line
+  double **bulkmodulus;
+  double **kn;
 
   double *onerad_dynamic,*onerad_frozen;
   double *maxrad_dynamic,*maxrad_frozen;
 
   double scale;
-  double mhu;
   double stable_time_increment; // stable time step size
 
   void allocate();
