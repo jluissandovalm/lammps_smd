@@ -1,1 +1,1 @@
-# lammps_current
+# lammps_smd
