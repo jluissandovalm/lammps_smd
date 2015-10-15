@@ -210,7 +210,7 @@ void PairTSurfFrictHeat::compute(int eflag, int vflag) {
 					x3(2) = smd_data_9[tri][8];
 					PointTriangleDistance(x4, x1, x2, x3, cp, r);
 
-					deSum  = diffusiv[itype][jtype] / (r * pow(vol[particle],1/3)); // diffusivity = 1.0e-1
+					deSum  = diffusiv[itype][jtype] / (r * pow(vol[particle],1.0/3.0)); // diffusivity = 1.0e-1
 
 					deSum *= (heatCap[itype][jtype] * rmass[particle] * wallTemp[itype][jtype] - e[particle]);
 					de[particle] += deSum;
@@ -456,11 +456,7 @@ void PairTSurfFrictHeat::coeff(int narg, char **arg) {
 	double heatCap_in      = atof(arg[5]);
 	double diffusiv_in     = atof(arg[6]);
 
-	printf("Friction Coefficient is: %f\n", friCoeff_in);
-	printf("Wall Temperature is:     %f\n", wallTemp_in);
-	printf("Heat Capacity is:        %f\n", heatCap_in);
-	printf("Diffusivity is:          %f\n", diffusiv_in);
-/*
+	/*
 	if (friction && heat)	{
 		if (narg != 7)  error->all(FLERR, "Incorrect args for pair coefficients");
 		double friCoeff_in = atof(arg[3]);

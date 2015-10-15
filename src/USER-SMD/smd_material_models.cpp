@@ -123,11 +123,11 @@ void polynomialEOS(double rho, double rho0, double e, double C0, double C1, doub
  Tait EOS based on current density vs. reference density.
 
  input: (1) reference sound speed
- (2) equilibrium mass density
- (3) current mass density
+        (2) equilibrium mass density
+        (3) current mass density
 
  output:(1) pressure
- (2) current speed of sound
+        (2) current speed of sound
  ------------------------------------------------------------------------- */
 void TaitEOS_density(const double exponent, const double c0_reference, const double rho_reference, const double rho_current,
 		double &pressure, double &sound_speed) {

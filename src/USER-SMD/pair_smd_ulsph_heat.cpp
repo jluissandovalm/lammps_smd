@@ -578,8 +578,10 @@ void PairULSPHHeat::compute(int eflag, int vflag) {
 				*/
 
 				if (heat) {
-					dUdt   = 4 * (DIFFUSIV[itype]+DIFFUSIV[jtype]) / 2;
-					dUdt  *= ivol * jvol * (e[i] / ivol - e[j] / jvol) * wfd/r;
+					dUdt   = 4 * ivol * jvol;
+					dUdt  *= 0.5 * (DIFFUSIV[itype] + DIFFUSIV[jtype]);
+					dUdt  *= (e[i] / ivol) - (e[j] / jvol);
+					dUdt  *= wfd / r;
 					deltaE = dUdt;
 				} else
 					deltaE = 0.0;
@@ -655,6 +657,8 @@ void PairULSPHHeat::AssembleStressTensor() {
 	double rho, effectiveViscosity;
 	Matrix3d deltaStressDev;
 
+	double temp, tempFact;
+
 	dtCFL = 1.0e22;
 	eye.setIdentity();
 
@@ -670,6 +674,17 @@ void PairULSPHHeat::AssembleStressTensor() {
 			K_eff = 0.0;
 			G_eff = 0.0;
 			D = 0.5 * (L[i] + L[i].transpose());
+
+
+			//Temperature-dependent Factor for scaling the Bulk and/or Shear Moduli
+			temp = e[i] / rmass[i]; // divided by cp
+			if (temp<=0) {
+				tempFact = 1.0;
+			}else if (0<temp && temp<=100){
+				tempFact = 1.0 - 0.01 * temp;
+			}else
+				tempFact = 0.0;
+
 
 			switch (eos[itype]) {
 			default:
@@ -769,6 +784,7 @@ void PairULSPHHeat::AssembleStressTensor() {
 					break;
 				case VISCOSITY_NEWTON:
 					effectiveViscosity = Lookup[VISCOSITY_MU][itype];
+					//effectiveViscosity *= tempfact
 //					double shear_rate = 2.0
 //							* sqrt(d_dev(0, 1) * d_dev(0, 1) + d_dev(0, 2) * d_dev(0, 2) + d_dev(1, 2) * d_dev(1, 2)); // 3d
 					//cout << "shear rate: " << shear_rate << endl;
